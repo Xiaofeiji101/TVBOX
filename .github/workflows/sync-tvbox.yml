@@ -1,0 +1,77 @@
+
+name: Sync TVBox config
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download and validate upstream JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="https://gitlab.com/noimank/tvbox/-/raw/main/tvboxmuti.json"
+          TMP="$(mktemp)"
+          trap 'rm -f "$TMP"' EXIT
+
+          # 下载失败、HTTP 错误或超时都不会覆盖旧配置
+          curl --fail --location --silent --show-error \
+            --retry 3 --connect-timeout 15 --max-time 60 \
+            "$URL" -o "$TMP"
+
+          # 检查 JSON 格式及必要的数据结构
+          python - "$TMP" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8-sig") as f:
+              data = json.load(f)
+
+          if not isinstance(data, dict):
+              raise SystemExit("Invalid config: root must be an object")
+
+          urls = data.get("urls")
+          if not isinstance(urls, list) or not urls:
+              raise SystemExit("Invalid config: urls must be a non-empty list")
+
+          for item in urls:
+              if not isinstance(item, dict):
+                  raise SystemExit("Invalid config: invalid source entry")
+              if not isinstance(item.get("url"), str) or not item["url"].strip():
+                  raise SystemExit("Invalid config: missing source URL")
+              if not isinstance(item.get("name"), str) or not item["name"].strip():
+                  raise SystemExit("Invalid config: missing source name")
+
+          print(f"Validated {len(urls)} sources.")
+          PY
+
+          # 只有验证通过才替换文件
+          mv "$TMP" tvboxmuti.json
+
+      - name: Commit changes if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add tvboxmuti.json
+
+          if git diff --cached --quiet; then
+            echo "No changes detected."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update TVBox configuration"
+          git push
